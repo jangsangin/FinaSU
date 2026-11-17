@@ -313,17 +313,25 @@ fn collect_rules_filtered(
             ancestors: HashSet::new(),
             seen: HashMap::new(),
         };
-        for partition in cfg.partitions {
-            let dir = module.join(partition);
+        // Installed-type NoMount does not restrict itself to a fixed partition
+        // whitelist: any top-level module folder that mirrors something real
+        // on the device becomes a target. Mirror that here instead of only
+        // walking `cfg.partitions`, so a module using an OEM-specific
+        // top-level name (not in TARGET_PARTITIONS) is still picked up by the
+        // built-in backend.
+        let mut top_level = fs.read_dir(&module)?;
+        top_level.sort_unstable();
+        for name in top_level {
+            let dir = module.join(&name);
             if !matches!(fs.kind(&dir)?, EntryKind::Dir | EntryKind::Symlink) {
                 continue;
             }
-            let real = cfg.root.join(partition);
-            let nested = cfg.system_root.join(partition);
+            let real = cfg.root.join(&name);
+            let nested = cfg.system_root.join(&name);
             if !fs.exists(&real)? && !fs.exists(&nested)? {
                 continue;
             }
-            walker.walk(&dir, partition)?;
+            walker.walk(&dir, &name)?;
         }
         if plan.rules.len() == start {
             plan.skipped.push((id, "no partition content".to_string()));
@@ -342,9 +350,11 @@ struct Walker<'a, F> {
 }
 
 fn protected_directory(path: &str) -> bool {
-    TARGET_PARTITIONS
-        .iter()
-        .any(|part| path == format!("/{part}"))
+    let trimmed = path.trim_start_matches('/');
+    // Any top-level virtual target ("/vendor", "/op_custom", ...) is a
+    // partition root regardless of whether its name is in the known-name
+    // list, now that the walker discovers partitions dynamically.
+    (!trimmed.is_empty() && !trimmed.contains('/'))
         || Path::new(path).file_name().is_some_and(|name| {
             ["lib64", "lib", "bin", "etc"]
                 .iter()
